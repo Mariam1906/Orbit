@@ -107,6 +107,7 @@ function createLedgerIndexer({ supabase, server, contractId, startLedger, batchS
 }
 
 function registerIndexerRoutes(app) {
+    if (app.locals.healthMetricsRegistered) return;
     app.get('/health/ready', async (req, res) => {
         if (!app.locals.ledgerIndexer) return res.status(503).json({ ready: false, warning: 'Ledger indexer is not configured' });
         const status = await app.locals.ledgerIndexer.health();
