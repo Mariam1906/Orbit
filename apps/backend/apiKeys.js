@@ -8,7 +8,7 @@ const PREFIX_SECRET_CHARS = 4;
 // last_used_at is only written when it is older than this, so every request is not a DB write
 const LAST_USED_WRITE_INTERVAL_MS = Number(process.env.API_KEY_LAST_USED_WRITE_INTERVAL_MS) || 60 * 1000;
 
-const API_KEY_SELECT = 'id, merchant_id, name, key_prefix, environment, last_used_at, revoked_at, merchants(id, name, wallet_address)';
+const API_KEY_SELECT = 'id, merchant_id, name, key_prefix, environment, organization_member_wallet, last_used_at, revoked_at, merchants(id, name, wallet_address)';
 
 const hashApiKey = (secret) => crypto.createHash('sha256').update(secret).digest('hex');
 
@@ -31,12 +31,14 @@ const generateApiKey = (environment) => {
 };
 
 // Inserts a key for a merchant. Returns { apiKey, secret }; only the hash is persisted.
-const issueApiKey = async (supabase, { merchantId, name, environment }) => {
+const issueApiKey = async (supabase, { merchantId, name, environment, organizationMemberWallet = null }) => {
     const { secret, prefix, hash } = generateApiKey(environment);
+    const row = { merchant_id: merchantId, name, key_prefix: prefix, key_hash: hash, environment };
+    if (organizationMemberWallet) row.organization_member_wallet = organizationMemberWallet;
     const { data, error } = await supabase
         .from('api_keys')
-        .insert([{ merchant_id: merchantId, name, key_prefix: prefix, key_hash: hash, environment }])
-        .select('id, name, key_prefix, environment, created_at, last_used_at, revoked_at')
+        .insert([row])
+        .select('id, name, key_prefix, environment, organization_member_wallet, created_at, last_used_at, revoked_at')
         .single();
     if (error) return { error };
     return { apiKey: data, secret };
@@ -104,6 +106,7 @@ const requireApiKey = (getSupabase) => async (req, res, next) => {
             name: keyRow.name,
             prefix: keyRow.key_prefix,
             environment: keyRow.environment,
+            member_wallet: keyRow.organization_member_wallet || keyRow.merchants.wallet_address,
         };
         touchLastUsed(supabase, keyRow);
         next();
