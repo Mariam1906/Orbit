@@ -65,9 +65,8 @@ const {
 } = require('./contract-state-snapshot');
 const { getDatabaseManager } = require('./db');
 const { registerPrivacyRoutes } = require('./privacy');
-const { createPayoutSplitDispatcher, registerPayoutSplitRoutes } = require('./payout-splits');
-const { createPriceIndexationWorker, registerPriceIndexationRoutes } = require('./price-indexation');
 const { registerProofRoutes } = require('./proofs');
+const { createInvoiceService, registerInvoiceRoutes } = require('./invoices');
 
 const app = express();
 // Set when running behind a reverse proxy so req.ip (used for rate limiting) is the client's address
@@ -514,7 +513,6 @@ const applyPullOutcome = async ({
     signedTx = null,
     extraBody = {},
 }) => {
-const applyPullOutcome = async ({ supabase, req, sub, merchant, subscription_id, txHash, status, confirmation, extraBody = {} }) => {
     if (status === "SUCCESS") {
         const pullTime = new Date();
         const nextBilling = new Date(pullTime.getTime() + Number(sub.plans.interval_seconds) * 1000);
@@ -567,31 +565,6 @@ const applyPullOutcome = async ({ supabase, req, sub, merchant, subscription_id,
                 }
             }
 
-            if (confirmation) {
-                const verifiedAmount = require('./transaction-report').confirmedSettlementAmount(
-                    confirmation,
-                    {
-                        customerWallet: sub.customer_wallet_address,
-                        merchantWallet: merchant.wallet_address,
-                        contractId: process.env.ORBIT_CONTRACT_ID,
-                    },
-                );
-                if (verifiedAmount === null) {
-                    console.error('CRITICAL: confirmed transfer missing verified amount; reconcile transaction:', txHash);
-                } else {
-                    const { error: paymentError } = await supabase.from('payment_transactions').insert([{
-                        merchant_id: sub.plans.merchant_id,
-                        subscription_id,
-                        plan_id: sub.plan_id,
-                        customer_wallet_address: sub.customer_wallet_address,
-                        amount_usdc_units: verifiedAmount,
-                        status: 'settled',
-                        tx_hash: txHash,
-                        settled_at: pullTime.toISOString(),
-                    }]);
-                    if (paymentError && paymentError.code !== '23505') {
-                        console.error('CRITICAL: on-chain settlement needs ledger reconciliation:', txHash, paymentError);
-                    }
             // Only record amounts independently verified from the
             // successful on-chain funds_pulled event. Plan and oracle
             // quotes are not necessarily the vault's actual transfer.
@@ -604,7 +577,7 @@ const applyPullOutcome = async ({ supabase, req, sub, merchant, subscription_id,
             if (verifiedAmount === null) {
                 console.error('CRITICAL: confirmed transfer missing verified amount; reconcile transaction:', txHash);
             } else {
-                const { error: paymentError } = await supabase.from('payment_transactions').insert([{
+                const paymentRecord = {
                     merchant_id: sub.plans.merchant_id,
                     subscription_id,
                     plan_id: sub.plan_id,
@@ -613,9 +586,26 @@ const applyPullOutcome = async ({ supabase, req, sub, merchant, subscription_id,
                     status: 'settled',
                     tx_hash: txHash,
                     settled_at: pullTime.toISOString(),
-                }]);
+                };
+                const { data: payment, error: paymentError } = await supabase.from('payment_transactions').insert([paymentRecord]).select().single();
                 if (paymentError && paymentError.code !== '23505') {
                     console.error('CRITICAL: on-chain settlement needs ledger reconciliation:', txHash, paymentError);
+                }
+                if (payment) {
+                    try {
+                        const invoiceService = app.locals.invoiceService || createInvoiceService({ supabase });
+                        await invoiceService.createForSettledPayment({
+                            payment,
+                            merchant,
+                            plan: sub.plans,
+                            subscription: sub,
+                            ledgerSequence: confirmation?.ledger ?? confirmation?.ledgerSequence ?? null,
+                        });
+                    } catch (invoiceError) {
+                        // A receipt is retriable operational work; it must never roll
+                        // back an independently confirmed on-chain settlement.
+                        console.error('Invoice generation failed:', invoiceError);
+                    }
                 }
             }
 
@@ -1950,6 +1940,7 @@ app.post('/webhooks/:id/backfill', async (req, res) => {
 });
 
 registerComplianceRoutes(app, getSupabase, authenticateMerchant);
+registerInvoiceRoutes(app, getSupabase, authenticateMerchant);
 registerPrivacyRoutes(app, { getPrimarySupabase, authenticateMerchant });
 registerProofRoutes(app, { getPrimarySupabase, authenticateMerchant });
 registerSigningSessionRoutes(app, getSupabase, authenticateMerchant);
