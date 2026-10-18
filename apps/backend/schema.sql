@@ -94,6 +94,27 @@ CREATE TABLE api_keys (
 CREATE UNIQUE INDEX api_keys_key_hash_idx ON api_keys (key_hash);
 CREATE INDEX api_keys_merchant_id_idx ON api_keys (merchant_id);
 
+-- Multi-tenant organization boundary and wallet-bound role membership (#68).
+CREATE TABLE organizations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    merchant_id UUID NOT NULL UNIQUE REFERENCES merchants(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    slug VARCHAR(80) NOT NULL UNIQUE CHECK (slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+);
+CREATE TABLE organization_members (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+    wallet_address VARCHAR(255) NOT NULL,
+    role VARCHAR(16) NOT NULL CHECK (role IN ('owner', 'admin', 'developer', 'viewer')),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+    UNIQUE (organization_id, wallet_address)
+);
+CREATE INDEX organization_members_org_role_idx ON organization_members (organization_id, role);
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS organization_member_wallet VARCHAR(255);
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE organization_members ENABLE ROW LEVEL SECURITY;
+
 -- 7. Audit Logs Table
 -- Immutable audit records for financial mutations and administrative actions
 CREATE TABLE audit_logs (
